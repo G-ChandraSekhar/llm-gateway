@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fakeredis.aioredis
 import httpx
 import pytest
 import pytest_asyncio
@@ -10,6 +11,7 @@ from app.adapters.openai import OpenAIAdapter
 from app.core.adapters import get_openai_adapter
 from app.core.circuit_breaker import CircuitBreaker, get_circuit_breaker
 from app.core.config import Settings, get_settings
+from app.core.rate_limiter import RateLimiter, get_rate_limiter
 from app.main import app
 
 
@@ -56,10 +58,18 @@ async def chat_client(client: AsyncClient) -> AsyncClient:
         failure_threshold=settings.circuit_breaker_failure_threshold,
         cooldown_seconds=settings.circuit_breaker_cooldown_seconds,
     )
+    # High enough that no routing/fallback-focused test below could ever
+    # hit it by accident. Dedicated rate-limit tests override this per test.
+    rate_limiter = RateLimiter(
+        fakeredis.aioredis.FakeRedis(decode_responses=True),
+        requests_per_minute=100_000,
+        tokens_per_minute=100_000_000,
+    )
 
     app.dependency_overrides[get_openai_adapter] = lambda: adapter
     app.dependency_overrides[get_settings] = lambda: settings
     app.dependency_overrides[get_circuit_breaker] = lambda: circuit_breaker
+    app.dependency_overrides[get_rate_limiter] = lambda: rate_limiter
     # Stashed on the client so individual tests can pre-trip the circuit
     # breaker or swap retry settings without re-plumbing the whole fixture.
     client._test_settings = settings  # type: ignore[attr-defined]
@@ -68,6 +78,7 @@ async def chat_client(client: AsyncClient) -> AsyncClient:
     app.dependency_overrides.pop(get_openai_adapter, None)
     app.dependency_overrides.pop(get_settings, None)
     app.dependency_overrides.pop(get_circuit_breaker, None)
+    app.dependency_overrides.pop(get_rate_limiter, None)
 
 
 async def _create_key(client: AsyncClient) -> str:
@@ -268,3 +279,77 @@ async def test_router_skips_model_with_open_circuit_and_goes_straight_to_fallbac
     # Exactly ONE HTTP call was made — gpt-4o was skipped entirely because
     # its circuit was open, not called-and-failed.
     assert route.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_router_returns_429_when_rate_limited_before_calling_any_model(chat_client: AsyncClient):
+    # Override with a 1-request-per-minute limiter just for this test.
+    tiny_limiter = RateLimiter(
+        fakeredis.aioredis.FakeRedis(decode_responses=True), requests_per_minute=1, tokens_per_minute=100_000
+    )
+    app.dependency_overrides[get_rate_limiter] = lambda: tiny_limiter
+
+    raw_key = await _create_key(chat_client)
+
+    with respx.mock:
+        route = respx.post("https://api.openai.com/v1/chat/completions").mock(
+            return_value=_openai_success("gpt-4o-mini")
+        )
+
+        # 1st request: within the limit, consumes the only unit in the bucket.
+        resp1 = await chat_client.post(
+            "/v1/chat/completions",
+            json={"model": "gpt-4o-mini", "messages": [{"role": "user", "content": "hi"}]},
+            headers={"Authorization": f"Bearer {raw_key}"},
+        )
+        assert resp1.status_code == 200
+
+        # 2nd request: bucket is empty, should be rejected with 429 —
+        # and crucially, NO additional call to OpenAI should have happened.
+        resp2 = await chat_client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "gpt-4o-mini",
+                "fallback_models": ["gpt-4o"],  # even with a fallback set...
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+            headers={"Authorization": f"Bearer {raw_key}"},
+        )
+        assert resp2.status_code == 429
+        assert "Retry-After" in resp2.headers
+        assert route.call_count == 1  # still just the one call from resp1 — fallback never attempted
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_is_scoped_per_key_not_global(chat_client: AsyncClient):
+    tiny_limiter = RateLimiter(
+        fakeredis.aioredis.FakeRedis(decode_responses=True), requests_per_minute=1, tokens_per_minute=100_000
+    )
+    app.dependency_overrides[get_rate_limiter] = lambda: tiny_limiter
+
+    key_a = await _create_key(chat_client)
+    key_b = await _create_key(chat_client)
+
+    with respx.mock:
+        respx.post("https://api.openai.com/v1/chat/completions").mock(return_value=_openai_success("gpt-4o-mini"))
+
+        resp_a1 = await chat_client.post(
+            "/v1/chat/completions",
+            json={"model": "gpt-4o-mini", "messages": [{"role": "user", "content": "hi"}]},
+            headers={"Authorization": f"Bearer {key_a}"},
+        )
+        assert resp_a1.status_code == 200
+
+        resp_a2 = await chat_client.post(
+            "/v1/chat/completions",
+            json={"model": "gpt-4o-mini", "messages": [{"role": "user", "content": "hi"}]},
+            headers={"Authorization": f"Bearer {key_a}"},
+        )
+        assert resp_a2.status_code == 429  # key_a is over its own limit
+
+        resp_b1 = await chat_client.post(
+            "/v1/chat/completions",
+            json={"model": "gpt-4o-mini", "messages": [{"role": "user", "content": "hi"}]},
+            headers={"Authorization": f"Bearer {key_b}"},
+        )
+        assert resp_b1.status_code == 200  # key_b has its own untouched bucket

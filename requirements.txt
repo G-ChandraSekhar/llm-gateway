@@ -15,3 +15,5 @@ pytest
 pytest-asyncio
 respx
 aiosqlite
+fakeredis
+lupa

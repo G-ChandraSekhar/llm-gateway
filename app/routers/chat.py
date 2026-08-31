@@ -8,6 +8,7 @@ from app.core.adapters import get_openai_adapter
 from app.core.auth import get_current_api_key
 from app.core.circuit_breaker import CircuitBreaker, get_circuit_breaker
 from app.core.config import Settings, get_settings
+from app.core.rate_limiter import enforce_rate_limit
 from app.core.resilience import CircuitOpenError, call_model
 from app.models.api_key import APIKey
 from app.schemas.chat import ChatCompletionRequest, ChatCompletionResponse
@@ -15,7 +16,7 @@ from app.schemas.chat import ChatCompletionRequest, ChatCompletionResponse
 router = APIRouter(prefix="/v1", tags=["chat"])
 
 
-@router.post("/chat/completions", response_model=ChatCompletionResponse)
+@router.post("/chat/completions", response_model=ChatCompletionResponse, dependencies=[Depends(enforce_rate_limit)])
 async def chat_completions(
     body: ChatCompletionRequest,
     api_key: APIKey = Depends(get_current_api_key),
@@ -23,7 +24,13 @@ async def chat_completions(
     circuit_breaker: CircuitBreaker = Depends(get_circuit_breaker),
     settings: Settings = Depends(get_settings),
 ) -> ChatCompletionResponse:
-    """Tries `body.model` first, then each model in `body.fallback_models`
+    """Auth (get_current_api_key) and rate limiting (enforce_rate_limit,
+    Day 7) both run before any model is attempted — a rate-limited request
+    gets a 429 immediately, since every model would hit the identical
+    per-key limit; trying a different model can't help the way it can for
+    a provider failure.
+
+    Tries `body.model` first, then each model in `body.fallback_models`
     in order, on ANY failure — not just retryable ones (Day 4's decision:
     an invalid-request error against gpt-4o might still succeed against
     gpt-4o-mini).

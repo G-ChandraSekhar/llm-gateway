@@ -28,15 +28,20 @@ pip install -r requirements.txt
 cp .env.example .env
 # edit .env: OPENAI_API_KEY=...
 
-# 5. run the test suite
+# 5. run the test suite (uses SQLite + fakeredis, no external services needed)
 pytest -v
 
-# 6. (optional, for exploring the API locally without installing Postgres)
+# 6. install and start Redis (needed to actually run the app, not just tests)
+brew install redis
+brew services start redis
+redis-cli ping   # should print PONG
+
+# 7. (optional, for exploring the API locally without installing Postgres)
 #    point the app at a throwaway SQLite file and run the migration:
 export DATABASE_URL="sqlite+aiosqlite:///./dev.db"
 alembic upgrade head
 
-# 7. boot the app
+# 8. boot the app
 uvicorn app.main:app --reload
 # then in another terminal:
 curl http://localhost:8000/health
@@ -48,12 +53,10 @@ curl -X POST http://localhost:8000/v1/chat/completions \
   -d '{"model": "gpt-4o", "fallback_models": ["gpt-4o-mini"], "messages": [{"role": "user", "content": "hello"}]}'
 ```
 
-`/health` needs no database. `/v1/keys` and `/v1/keys/me` do — either point
-`DATABASE_URL` at SQLite as above for quick local exploration, or run real
-Postgres (Day 10 adds `docker-compose.yml` for that; until then,
-`docker run -p 5432:5432 -e POSTGRES_PASSWORD=gateway postgres` plus
-`DATABASE_URL=postgresql+asyncpg://postgres:gateway@localhost:5432/postgres`
-works too).
+`/health` needs no database or Redis. `/v1/keys` and `/v1/keys/me` need
+Postgres or SQLite as above. `/v1/chat/completions` additionally needs
+Redis running (Day 7's rate limiter) — without it, that endpoint will
+fail to connect rather than silently skip rate limiting.
 
 ## Push to GitHub (first time)
 
@@ -89,7 +92,9 @@ llm-gateway/
 │   │   ├── auth.py               # get_current_api_key dependency
 │   │   ├── adapters.py           # get_openai_adapter singleton
 │   │   ├── circuit_breaker.py    # per-model CircuitBreaker (Day 5)
-│   │   └── resilience.py         # call_model: retry + circuit breaker (Day 5)
+│   │   ├── resilience.py         # call_model: retry + circuit breaker (Day 5)
+│   │   ├── rate_limiter.py       # Redis token bucket, per API key (Day 7)
+│   │   └── token_estimate.py     # pre-call token estimate for rate limiting (Day 7)
 │   ├── schemas/
 │   │   └── chat.py               # unified ChatCompletionRequest/Response
 │   ├── models/
@@ -108,5 +113,6 @@ llm-gateway/
     ├── test_keys_router.py
     ├── test_chat_router.py
     ├── test_circuit_breaker.py
-    └── test_resilience.py
+    ├── test_resilience.py
+    └── test_rate_limiter.py
 ```

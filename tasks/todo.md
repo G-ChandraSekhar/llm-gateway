@@ -225,3 +225,65 @@ sharing global state across the test file.
   network call, not called-and-failed-again.
 - Not yet done: Redis-backed circuit breaker/rate-limit state (Day 7),
   rate limiting itself (Day 7), budget enforcement (Day 8).
+
+---
+
+# Day 7 — Redis-backed rate limiting per API key
+
+## Decisions (yours)
+- **Limits both requests/min AND tokens/min**, not just requests.
+- **One rate-limit check per incoming request, not per model.** A
+  rate-limited key is rejected with 429 immediately — Day 4's fallback
+  logic never runs, since every model would hit the identical per-key
+  bucket. (This is a real design correction from the initial framing:
+  fallback exists for *provider* failures, which differ per model; a rate
+  limit is a property of the *key*, which doesn't.)
+
+## Built
+- [x] app/core/rate_limiter.py — `RateLimiter`: Redis-backed token
+      bucket, atomic via a single Lua script (`EVAL`) covering both the
+      requests bucket and tokens bucket in one round trip. If either
+      bucket is short, NEITHER is consumed — a request rejected for being
+      over the token budget doesn't also waste a unit of the request
+      budget.
+- [x] app/core/token_estimate.py — `estimate_request_tokens()`: rough
+      pre-call estimate (~4 chars/token + `max_tokens` or a default) used
+      only for rate-limiting. Explicitly NOT used for billing — Day 8's
+      budget tracker will use the provider's real post-call usage numbers,
+      and the two are allowed to disagree.
+- [x] `enforce_rate_limit` FastAPI dependency, wired into
+      `/v1/chat/completions` as a route-level dependency (runs before the
+      model-attempt loop, shares the parsed request body with the main
+      handler — verified this actually works, not assumed)
+- [x] tests/test_rate_limiter.py — 6 tests against `fakeredis` (bucket
+      depletion, refill over time via a fake clock, independent per-key
+      buckets, and the atomicity guarantee above)
+- [x] tests/test_chat_router.py — 2 new integration tests: 429 returned
+      with no model ever called even when `fallback_models` is set; two
+      different keys have fully independent limits
+
+## Review
+- `pytest -v`: 45/45 passed (6 new rate-limiter unit tests, 2 new router
+  integration tests).
+- Verified the Lua script against a REAL Redis server (not just
+  `fakeredis`) — installed `redis-server` directly, ran the same
+  `RateLimiter` class against it, inspected the actual Redis hash keys
+  afterward (`ratelimit:<key>:requests` / `:tokens`) to confirm the
+  stored float levels and timestamps matched the expected math exactly
+  (3 req/min bucket, 3 calls succeed, 4th blocked with `retry_after≈20s`,
+  matching `(1 - level) / (3/60)`).
+- Live end-to-end test: real `uvicorn` + real Redis + a separate real
+  fake-OpenAI process, 2 req/min limit. Requests 1-2 succeeded (both
+  logged as real network hits by the fake server); request 3 — sent WITH
+  a `fallback_models` entry — got a 429 with `retry_after_seconds: 29.93`,
+  and the fake server's log shows **zero** entries for that request,
+  proving no network call happened at all, fallback included.
+- Not yet done: Day 8 budget enforcement (spend tracking against
+  `budget_limit_cents`); circuit breaker still in-memory, not yet moved to
+  Redis (flagged as a gap since Day 5 — still open, now that Redis is
+  actually wired into the project there's no remaining reason not to do
+  this next if it matters for the story).
+
+## New local dependency
+Redis is now required to run `/v1/chat/completions` for real (not just
+`pytest`, which uses `fakeredis`). See README for install instructions.
