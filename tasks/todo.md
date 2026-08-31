@@ -425,3 +425,40 @@ directly in `enforce_budget`'s docstring.
   body, no model ever called.
 - Not yet done: Day 9-10 (broader edge-case tests, Docker Compose,
   README architecture diagram, load test).
+
+---
+
+# Bug found by real OpenAI, not my own testing: dated model snapshot names
+
+## What happened
+Live-tested Day 8 budget tracking against the real OpenAI API (not my
+sandbox's fake stand-in). A request for `gpt-4o-mini` came back with
+`model: "gpt-4o-mini-2024-07-18"` in the response — OpenAI returns the
+specific dated snapshot that actually served the request, not the
+generic alias the caller asked for. My pricing table only had exact
+entries for `"gpt-4o"` / `"gpt-4o-mini"`, so `get_pricing()` returned
+`None`, and the server correctly logged "No pricing entry ... spend NOT
+recorded" — the fallback behavior worked exactly as designed, but it
+exposed that the real behavior differs from what my fake-OpenAI stand-in
+was simulating (which just echoed back whatever model name was sent).
+
+This is exactly the kind of gap that only shows up against the real API,
+not a mock — and exactly why testing with a real OpenAI key matters even
+after extensive mocked/simulated verification.
+
+## Fix
+`get_pricing()` now falls back to prefix matching (`"gpt-4o-mini-2024-
+07-18".startswith("gpt-4o-mini-")`) when there's no exact match, checking
+longer known base names first — `"gpt-4o-mini-..."` must resolve to
+`"gpt-4o-mini"`'s pricing, not the shorter `"gpt-4o"` prefix it also
+happens to start with. Verified with dedicated tests including the
+"longer prefix wins" case and a documented (low-risk, accepted)
+limitation: an unrelated future model that happens to share a prefix with
+a known base name (not a dated snapshot of it) would be mis-priced. Real
+OpenAI naming conventions make this unlikely in practice.
+
+## Review
+- `pytest -v`: 64/64 passed (4 new pricing tests specifically for dated
+  snapshot resolution).
+- Re-confirmed live against real OpenAI + real Redis after the fix — see
+  next live-verification note once re-run.

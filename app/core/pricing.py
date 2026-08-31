@@ -21,7 +21,25 @@ _PRICING: dict[str, ModelPricing] = {
 
 
 def get_pricing(model: str) -> ModelPricing | None:
-    return _PRICING.get(model)
+    if model in _PRICING:
+        return _PRICING[model]
+
+    # OpenAI often returns a dated snapshot name in the response (e.g.
+    # "gpt-4o-mini-2024-07-18") even when the caller requested the
+    # generic alias ("gpt-4o-mini") — confirmed against the real API,
+    # not just assumed. Match by "base name + hyphen" prefix, checking
+    # longer known base names first so "gpt-4o-mini-..." resolves to
+    # "gpt-4o-mini" and not the shorter "gpt-4o" it also starts with.
+    #
+    # Known simplification: if OpenAI ever ships a genuinely different
+    # model whose name happens to start with "gpt-4o-mini-" (not a dated
+    # snapshot of it), this would mis-price it. Low risk given OpenAI's
+    # actual naming convention, but a real one — worth another look if
+    # new model families with overlapping prefixes show up.
+    for base_name in sorted(_PRICING, key=len, reverse=True):
+        if model.startswith(base_name + "-"):
+            return _PRICING[base_name]
+    return None
 
 
 def compute_cost_micros(model: str, prompt_tokens: int, completion_tokens: int) -> int | None:
