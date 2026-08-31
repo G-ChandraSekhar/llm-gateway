@@ -1,0 +1,16 @@
+fastapi
+uvicorn[standard]
+pydantic
+pydantic-settings
+httpx
+tenacity
+redis
+sqlalchemy[asyncio]
+asyncpg
+alembic
+structlog
+
+# dev / test
+pytest
+pytest-asyncio
+respx
