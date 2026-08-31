@@ -86,7 +86,10 @@ llm-gateway/
 │   │   ├── config.py             # pydantic-settings, env-driven config
 │   │   ├── db.py                 # async engine/session, get_db dependency
 │   │   ├── security.py           # API key generation + hashing
-│   │   └── auth.py               # get_current_api_key dependency
+│   │   ├── auth.py               # get_current_api_key dependency
+│   │   ├── adapters.py           # get_openai_adapter singleton
+│   │   ├── circuit_breaker.py    # per-model CircuitBreaker (Day 5)
+│   │   └── resilience.py         # call_model: retry + circuit breaker (Day 5)
 │   ├── schemas/
 │   │   └── chat.py               # unified ChatCompletionRequest/Response
 │   ├── models/
@@ -103,5 +106,7 @@ llm-gateway/
     ├── test_openai_adapter.py
     ├── test_security.py
     ├── test_keys_router.py
-    └── test_chat_router.py
+    ├── test_chat_router.py
+    ├── test_circuit_breaker.py
+    └── test_resilience.py
 ```
