@@ -55,6 +55,7 @@ async def chat_client(client: AsyncClient) -> AsyncClient:
     )
     adapter = OpenAIAdapter(settings, client=httpx.AsyncClient(base_url=settings.openai_base_url))
     circuit_breaker = CircuitBreaker(
+        fakeredis.aioredis.FakeRedis(decode_responses=True),
         failure_threshold=settings.circuit_breaker_failure_threshold,
         cooldown_seconds=settings.circuit_breaker_cooldown_seconds,
     )
@@ -259,8 +260,8 @@ async def test_router_skips_model_with_open_circuit_and_goes_straight_to_fallbac
     # Override with a fresh, low-threshold circuit breaker just for this
     # test, then trip gpt-4o's circuit via the public API before the
     # request — cleaner than reaching into CircuitBreaker internals.
-    low_threshold_cb = CircuitBreaker(failure_threshold=1, cooldown_seconds=30)
-    low_threshold_cb.record_failure("gpt-4o")
+    low_threshold_cb = CircuitBreaker(fakeredis.aioredis.FakeRedis(decode_responses=True), failure_threshold=1, cooldown_seconds=30)
+    await low_threshold_cb.record_failure("gpt-4o")
     app.dependency_overrides[get_circuit_breaker] = lambda: low_threshold_cb
 
     route = respx.post("https://api.openai.com/v1/chat/completions").mock(

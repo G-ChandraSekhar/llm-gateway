@@ -91,7 +91,7 @@ llm-gateway/
 │   │   ├── security.py           # API key generation + hashing
 │   │   ├── auth.py               # get_current_api_key dependency
 │   │   ├── adapters.py           # get_openai_adapter singleton
-│   │   ├── circuit_breaker.py    # per-model CircuitBreaker (Day 5)
+│   │   ├── circuit_breaker.py    # per-model CircuitBreaker, Redis-backed (Day 5, moved to Redis after Day 7)
 │   │   ├── resilience.py         # call_model: retry + circuit breaker (Day 5)
 │   │   ├── rate_limiter.py       # Redis token bucket, per API key (Day 7)
 │   │   └── token_estimate.py     # pre-call token estimate for rate limiting (Day 7)

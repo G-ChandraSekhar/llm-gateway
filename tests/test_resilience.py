@@ -1,3 +1,4 @@
+import fakeredis.aioredis
 import httpx
 import pytest
 import respx
@@ -48,7 +49,7 @@ async def test_succeeds_on_first_try_no_retry_needed():
     )
     settings = fast_settings()
     adapter = OpenAIAdapter(settings, client=httpx.AsyncClient(base_url=settings.openai_base_url))
-    cb = CircuitBreaker(failure_threshold=100, cooldown_seconds=30)
+    cb = CircuitBreaker(fakeredis.aioredis.FakeRedis(decode_responses=True), failure_threshold=100, cooldown_seconds=30)
 
     result = await call_model(adapter, cb, make_request(), settings)
 
@@ -68,7 +69,7 @@ async def test_retries_retryable_failure_then_succeeds():
     )
     settings = fast_settings(retry_max_attempts=3)
     adapter = OpenAIAdapter(settings, client=httpx.AsyncClient(base_url=settings.openai_base_url))
-    cb = CircuitBreaker(failure_threshold=100, cooldown_seconds=30)
+    cb = CircuitBreaker(fakeredis.aioredis.FakeRedis(decode_responses=True), failure_threshold=100, cooldown_seconds=30)
 
     result = await call_model(adapter, cb, make_request(), settings)
 
@@ -84,7 +85,7 @@ async def test_non_retryable_failure_raises_immediately_no_retry():
     )
     settings = fast_settings(retry_max_attempts=3)
     adapter = OpenAIAdapter(settings, client=httpx.AsyncClient(base_url=settings.openai_base_url))
-    cb = CircuitBreaker(failure_threshold=100, cooldown_seconds=30)
+    cb = CircuitBreaker(fakeredis.aioredis.FakeRedis(decode_responses=True), failure_threshold=100, cooldown_seconds=30)
 
     with pytest.raises(ProviderError) as exc_info:
         await call_model(adapter, cb, make_request(), settings)
@@ -101,7 +102,7 @@ async def test_exhausts_retries_and_raises_last_error():
     )
     settings = fast_settings(retry_max_attempts=3)
     adapter = OpenAIAdapter(settings, client=httpx.AsyncClient(base_url=settings.openai_base_url))
-    cb = CircuitBreaker(failure_threshold=100, cooldown_seconds=30)
+    cb = CircuitBreaker(fakeredis.aioredis.FakeRedis(decode_responses=True), failure_threshold=100, cooldown_seconds=30)
 
     with pytest.raises(ProviderError) as exc_info:
         await call_model(adapter, cb, make_request(), settings)
@@ -117,15 +118,15 @@ async def test_failure_recorded_on_circuit_breaker():
     )
     settings = fast_settings(retry_max_attempts=1)
     adapter = OpenAIAdapter(settings, client=httpx.AsyncClient(base_url=settings.openai_base_url))
-    cb = CircuitBreaker(failure_threshold=2, cooldown_seconds=30)
+    cb = CircuitBreaker(fakeredis.aioredis.FakeRedis(decode_responses=True), failure_threshold=2, cooldown_seconds=30)
 
     with pytest.raises(ProviderError):
         await call_model(adapter, cb, make_request(), settings)
-    assert cb.is_open("gpt-4o") is False  # 1 failure, threshold is 2
+    assert await cb.is_open("gpt-4o") is False  # 1 failure, threshold is 2
 
     with pytest.raises(ProviderError):
         await call_model(adapter, cb, make_request(), settings)
-    assert cb.is_open("gpt-4o") is True  # 2nd failure trips it
+    assert await cb.is_open("gpt-4o") is True  # 2nd failure trips it
 
 
 @pytest.mark.asyncio
@@ -139,19 +140,19 @@ async def test_success_recorded_on_circuit_breaker_resets_it():
     )
     settings = fast_settings(retry_max_attempts=2)
     adapter = OpenAIAdapter(settings, client=httpx.AsyncClient(base_url=settings.openai_base_url))
-    cb = CircuitBreaker(failure_threshold=5, cooldown_seconds=30)
+    cb = CircuitBreaker(fakeredis.aioredis.FakeRedis(decode_responses=True), failure_threshold=5, cooldown_seconds=30)
 
     await call_model(adapter, cb, make_request(), settings)
 
-    assert cb.snapshot("gpt-4o")["failure_count"] == 0
+    assert (await cb.snapshot("gpt-4o")).failure_count == 0
 
 
 @pytest.mark.asyncio
 async def test_open_circuit_skips_call_entirely():
     settings = fast_settings()
     adapter = OpenAIAdapter(settings, client=httpx.AsyncClient(base_url=settings.openai_base_url))
-    cb = CircuitBreaker(failure_threshold=1, cooldown_seconds=30)
-    cb.record_failure("gpt-4o")  # trip the circuit before any call
+    cb = CircuitBreaker(fakeredis.aioredis.FakeRedis(decode_responses=True), failure_threshold=1, cooldown_seconds=30)
+    await cb.record_failure("gpt-4o")  # trip the circuit before any call
 
     with pytest.raises(CircuitOpenError):
         # No respx mock registered at all — if this made a real HTTP call

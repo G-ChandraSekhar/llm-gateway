@@ -287,3 +287,59 @@ sharing global state across the test file.
 ## New local dependency
 Redis is now required to run `/v1/chat/completions` for real (not just
 `pytest`, which uses `fakeredis`). See README for install instructions.
+
+---
+
+# Circuit breaker moved from in-memory to Redis (closing the Day 5 gap)
+
+## What changed
+`app/core/circuit_breaker.py` rewritten: same public interface
+(`is_open` / `record_success` / `record_failure` / `snapshot`), but now
+backed by Redis via two atomic Lua scripts instead of an in-process dict
++ lock. State is now shared across gateway processes/instances, not
+per-process — the gap flagged since Day 5 is closed.
+
+All three methods are now `async` (Redis calls require it), which
+required `await` at every call site: `app/core/resilience.py`'s
+`call_model`, plus every test that touches a `CircuitBreaker`
+(`tests/test_circuit_breaker.py` rewritten against `fakeredis`,
+`tests/test_resilience.py` and `tests/test_chat_router.py` updated to
+construct it with a Redis client and await its methods).
+
+## A real concurrency bug caught before it shipped
+Writing a test for "two requests arrive the instant the cooldown
+expires" exposed a genuine bug in the first draft of the `is_open` Lua
+script: it let ANY call through while the circuit was `half_open`, not
+just the single call that performed the `open -> half_open` transition.
+That means two concurrent requests could both slip through as "trial"
+calls simultaneously — defeating the entire point of a half-open trial
+(testing recovery with exactly one call, not flooding a possibly-still-
+down model with two).
+
+Fixed by making the script explicit: `half_open` state now blocks every
+caller except the one atomic transition itself. Verified with a dedicated
+test (`test_concurrent_half_open_transition_only_permits_one_trial`) and
+confirmed again live against real Redis via `redis-cli`, not just
+`fakeredis`.
+
+## Known accepted limitation (documented, not fixed)
+If the single trial call during `half_open` never resolves — e.g. the
+process crashes mid-request before calling `record_success`/
+`record_failure` — the circuit is stuck in `half_open` indefinitely, with
+no automatic timeout to recover. A production system would want a
+lease/TTL on the trial itself. Out of scope here; noted directly in the
+class docstring rather than left undocumented.
+
+## Review
+- `pytest -v`: 46/46 passed (8 circuit breaker unit tests, up from 7 — the
+  new concurrency test — plus all existing tests updated for the async
+  interface).
+- Live verification against REAL Redis (not fakeredis): ran the exact
+  open -> cooldown -> half_open -> concurrent-second-call-blocked ->
+  success -> closed sequence directly, inspecting Redis hash state via
+  the Python client at each step.
+- Full end-to-end live test: real `uvicorn` + real Redis + a separate real
+  fake-OpenAI process, threshold=2. Two real failures opened the circuit
+  (confirmed by reading it directly via `redis-cli hgetall`, not just
+  through the app); a third request with a fallback model set produced
+  exactly ONE real network call — to the fallback only.

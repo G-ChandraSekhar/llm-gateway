@@ -41,7 +41,7 @@ async def call_model(
     Raises CircuitOpenError (no network call made) if the circuit is
     open, or the underlying ProviderError if every retry attempt failed.
     """
-    if circuit_breaker.is_open(request.model):
+    if await circuit_breaker.is_open(request.model):
         raise CircuitOpenError(request.model)
 
     retryer = AsyncRetrying(
@@ -56,8 +56,8 @@ async def call_model(
     try:
         response = await retryer(adapter.chat_completion, request)
     except ProviderError:
-        circuit_breaker.record_failure(request.model)
+        await circuit_breaker.record_failure(request.model)
         raise
     else:
-        circuit_breaker.record_success(request.model)
+        await circuit_breaker.record_success(request.model)
         return response
