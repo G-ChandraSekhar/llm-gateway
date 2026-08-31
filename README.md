@@ -42,6 +42,10 @@ uvicorn app.main:app --reload
 curl http://localhost:8000/health
 curl -X POST http://localhost:8000/v1/keys -H "Content-Type: application/json" -d '{"name": "my key"}'
 curl http://localhost:8000/v1/keys/me -H "Authorization: Bearer <api_key from the previous response>"
+curl -X POST http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <api_key>" \
+  -d '{"model": "gpt-4o", "fallback_models": ["gpt-4o-mini"], "messages": [{"role": "user", "content": "hello"}]}'
 ```
 
 `/health` needs no database. `/v1/keys` and `/v1/keys/me` do — either point
@@ -92,10 +96,12 @@ llm-gateway/
 │   │   ├── base.py               # ProviderAdapter interface, ProviderError
 │   │   └── openai.py             # OpenAIAdapter
 │   └── routers/
-│       └── keys.py               # POST /v1/keys, GET /v1/keys/me
+│       ├── keys.py               # POST /v1/keys, GET /v1/keys/me
+│       └── chat.py               # POST /v1/chat/completions (fallback routing)
 └── tests/
     ├── conftest.py                # in-memory SQLite fixtures
     ├── test_openai_adapter.py
     ├── test_security.py
-    └── test_keys_router.py
+    ├── test_keys_router.py
+    └── test_chat_router.py
 ```
