@@ -11,10 +11,14 @@ from app.models.api_key import APIKey
 
 router = APIRouter(prefix="/v1/keys", tags=["keys"])
 
+_USD_TO_MICROS = 1_000_000
+
 
 class CreateAPIKeyRequest(BaseModel):
     name: str
-    budget_limit_cents: int | None = None
+    # Friendly dollar amount at the API boundary — stored internally as
+    # integer micros (see app/models/api_key.py for why).
+    budget_limit_usd: float | None = None
 
 
 class CreateAPIKeyResponse(BaseModel):
@@ -29,8 +33,8 @@ class APIKeyInfo(BaseModel):
     name: str
     prefix: str
     is_active: bool
-    budget_limit_cents: int | None
-    spent_cents: int
+    budget_limit_usd: float | None
+    spent_usd: float
 
 
 @router.post("", response_model=CreateAPIKeyResponse)
@@ -44,11 +48,14 @@ async def create_api_key(
     anywhere. Flagging it here rather than pretending it's already solved.
     """
     raw_key = generate_api_key()
+    budget_limit_micros = (
+        round(body.budget_limit_usd * _USD_TO_MICROS) if body.budget_limit_usd is not None else None
+    )
     api_key = APIKey(
         name=body.name,
         prefix=key_prefix(raw_key),
         hashed_key=hash_api_key(raw_key),
-        budget_limit_cents=body.budget_limit_cents,
+        budget_limit_micros=budget_limit_micros,
     )
     db.add(api_key)
     await db.commit()
@@ -64,6 +71,6 @@ async def whoami(api_key: APIKey = Depends(get_current_api_key)) -> APIKeyInfo:
         name=api_key.name,
         prefix=api_key.prefix,
         is_active=api_key.is_active,
-        budget_limit_cents=api_key.budget_limit_cents,
-        spent_cents=api_key.spent_cents,
+        budget_limit_usd=(api_key.budget_limit_micros / _USD_TO_MICROS) if api_key.budget_limit_micros is not None else None,
+        spent_usd=api_key.spent_micros / _USD_TO_MICROS,
     )

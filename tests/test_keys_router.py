@@ -15,7 +15,7 @@ async def test_create_key_returns_raw_key_once(client: AsyncClient):
 
 @pytest.mark.asyncio
 async def test_whoami_with_valid_key_succeeds(client: AsyncClient):
-    create_resp = await client.post("/v1/keys", json={"name": "alice", "budget_limit_cents": 500})
+    create_resp = await client.post("/v1/keys", json={"name": "alice", "budget_limit_usd": 5.0})
     raw_key = create_resp.json()["api_key"]
 
     resp = await client.get("/v1/keys/me", headers={"Authorization": f"Bearer {raw_key}"})
@@ -24,8 +24,8 @@ async def test_whoami_with_valid_key_succeeds(client: AsyncClient):
     body = resp.json()
     assert body["name"] == "alice"
     assert body["is_active"] is True
-    assert body["budget_limit_cents"] == 500
-    assert body["spent_cents"] == 0
+    assert body["budget_limit_usd"] == 5.0
+    assert body["spent_usd"] == 0.0
 
 
 @pytest.mark.asyncio

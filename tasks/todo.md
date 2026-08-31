@@ -343,3 +343,85 @@ class docstring rather than left undocumented.
   (confirmed by reading it directly via `redis-cli hgetall`, not just
   through the app); a third request with a fallback model set produced
   exactly ONE real network call — to the fallback only.
+
+---
+
+# Day 8 — Budget enforcement
+
+## Decisions (yours)
+- **Pre-check only**: a key already at/over budget is rejected before any
+  model is attempted. Exact spend is recorded AFTER a successful call,
+  from OpenAI's real usage numbers — never estimated.
+- **402 Payment Required** for an over-budget request (not 429 — that's
+  reserved for rate limiting; 402 is the semantically correct code for
+  "you've run out of budget").
+- **Pricing hardcoded**, verified via web search at build time (OpenAI
+  has no pricing API): gpt-4o $2.50/$10.00 per million tokens (input/
+  output), gpt-4o-mini $0.15/$0.60. Documented in code as a snapshot that
+  WILL drift — recheck https://openai.com/api/pricing periodically.
+
+## A real schema bug caught before it shipped
+Before writing any budget logic, I ran the actual math on the Day 3
+schema (`spent_cents` / `budget_limit_cents`, integer cents) against a
+realistic small request: 15 prompt + 8 completion tokens on gpt-4o-mini
+costs **$0.00000705** — 0.0007 cents. Rounded to whole cents, that's 0,
+every single time. `spent_cents` would never move under any realistic
+workload, making budget enforcement theater.
+
+Fixed by migrating the schema from cents to **micro-dollars** (millionths
+of a dollar) — still an integer column (no float accumulation drift,
+same reasoning as the original "integer cents" design), just six decimal
+places finer. The public API (`POST /v1/keys`, `GET /v1/keys/me`) exposes
+this as friendly dollar floats (`budget_limit_usd`, `spent_usd`) — micros
+are purely an internal storage detail.
+
+## Built
+- [x] alembic/versions/0002_rename_budget_columns_to_micros.py — renames
+      `budget_limit_cents`/`spent_cents` -> `budget_limit_micros`/
+      `spent_micros`. Verified both `upgrade` and `downgrade` against a
+      real SQLite file.
+- [x] app/models/api_key.py updated to the renamed columns
+- [x] app/core/pricing.py — hardcoded pricing table, `compute_cost_micros`
+      returns `None` (not 0) for an unpriced model, so unpriced spend is
+      never silently swallowed as "free"
+- [x] app/core/budget.py — `is_over_budget`, `enforce_budget` (FastAPI
+      dependency, 402 on violation), `record_spend` (atomic SQL
+      `UPDATE ... SET spent_micros = spent_micros + :cost`, not a Python
+      read-modify-write — concurrent requests against the same key can't
+      lose an update to a race)
+- [x] app/routers/chat.py: budget check wired in alongside rate limiting
+      (both run once per request, before the model-attempt loop); spend
+      recorded using whichever model actually served the response — if
+      the primary fails over to a cheaper fallback, spend reflects the
+      fallback's real pricing, not the primary's
+- [x] app/routers/keys.py: public API now speaks `budget_limit_usd` /
+      `spent_usd` (dollars), converting to/from micros internally
+- [x] tests/test_pricing.py (5), tests/test_budget.py (6),
+      3 new integration tests in tests/test_chat_router.py (over-budget
+      gets 402 with zero model calls; successful call records exact real
+      spend; spend uses the fallback model's pricing when a fallback
+      actually served the request, not the primary's)
+
+## Known gap, documented not fixed
+`enforce_budget` reads `spent_micros` as of when the key was loaded for
+the current request and doesn't re-query — a burst of concurrent requests
+against a key sitting exactly at its limit could all pass the check
+before any of their spend lands, briefly overspending. Closing this fully
+would need locking on every request, even when nobody's near their
+budget, which isn't worth the cost for this project's scale. Flagged
+directly in `enforce_budget`'s docstring.
+
+## Review
+- `pytest -v`: 60/60 passed (5 pricing, 6 budget, 3 new chat-router
+  integration tests, plus every existing test still green after the
+  schema rename).
+- Alembic migration verified both directions (`upgrade`/`downgrade`)
+  against a real SQLite file — schema matches expectations exactly.
+- Live end-to-end test: real `uvicorn` + real Redis + a separate real
+  fake-OpenAI process. Created a key with a budget smaller than one
+  call's real cost; first call succeeded (spend started at $0), correctly
+  recorded $0.000007 in exact spend from real usage numbers; second call
+  correctly got 402 with the exact spent/limit figures in the response
+  body, no model ever called.
+- Not yet done: Day 9-10 (broader edge-case tests, Docker Compose,
+  README architecture diagram, load test).

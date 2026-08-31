@@ -17,10 +17,10 @@ class APIKey(Base):
     """A gateway-issued API key. Callers authenticate with this; the
     gateway maps it to provider credentials the caller never sees.
 
-    Budget fields exist now (Day 3 schema) but nothing enforces them yet —
-    that lands in Day 8's budget tracker, which will increment
-    `spent_cents` per request and check it against `budget_limit_cents`
-    before letting a request out.
+    Budget enforcement (Day 8): `spent_micros` is incremented after every
+    successful call using the provider's real post-call token usage;
+    `budget_limit_micros` is checked BEFORE a request is allowed to call
+    any model. See app/core/budget.py and app/core/pricing.py.
     """
 
     __tablename__ = "api_keys"
@@ -40,7 +40,15 @@ class APIKey(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
-    # Integer cents, not float dollars — avoids floating-point rounding on
-    # money. NULL limit means unlimited.
-    budget_limit_cents: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    spent_cents: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    # Integer MICRO-dollars (millionths of a dollar), not cents. Cents
+    # rounded every realistic small request straight to 0 — a 15-prompt /
+    # 8-completion gpt-4o-mini call costs ~0.0007 cents, so spend would
+    # never move under the original Day 3 schema. Micros give six decimal
+    # places of precision as an integer, avoiding float accumulation drift
+    # while still being fine-grained enough to actually track real spend.
+    # NULL limit means unlimited. The public API (POST /v1/keys,
+    # GET /v1/keys/me) exposes these as friendly dollar floats — the
+    # micros unit is an internal storage detail, not something callers
+    # need to think in.
+    budget_limit_micros: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    spent_micros: Mapped[int] = mapped_column(Integer, default=0, nullable=False)

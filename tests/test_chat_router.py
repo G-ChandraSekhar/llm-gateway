@@ -354,3 +354,103 @@ async def test_rate_limit_is_scoped_per_key_not_global(chat_client: AsyncClient)
             headers={"Authorization": f"Bearer {key_b}"},
         )
         assert resp_b1.status_code == 200  # key_b has its own untouched bucket
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_over_budget_key_gets_402_before_calling_any_model(chat_client: AsyncClient):
+    create_resp = await chat_client.post("/v1/keys", json={"name": "broke", "budget_limit_usd": 0.01})
+    raw_key = create_resp.json()["api_key"]
+
+    # Manually push spend over the limit by hitting the DB directly through
+    # the same in-memory session the app uses (no endpoint exists yet to
+    # set spend directly — that's the point, spend only moves via real
+    # usage, so we simulate "already spent" the same way a real prior
+    # request would have left it).
+    from sqlalchemy import select
+
+    from app.models.api_key import APIKey
+
+    result = await chat_client._test_db_session.execute(select(APIKey).where(APIKey.prefix == create_resp.json()["prefix"]))
+    key_row = result.scalar_one()
+    key_row.spent_micros = 20_000  # $0.02, over the $0.01 limit
+    await chat_client._test_db_session.commit()
+
+    route = respx.post("https://api.openai.com/v1/chat/completions").mock(
+        return_value=_openai_success("gpt-4o-mini")
+    )
+
+    resp = await chat_client.post(
+        "/v1/chat/completions",
+        json={"model": "gpt-4o-mini", "messages": [{"role": "user", "content": "hi"}]},
+        headers={"Authorization": f"Bearer {raw_key}"},
+    )
+
+    assert resp.status_code == 402
+    assert resp.json()["detail"]["error"] == "Budget exceeded"
+    assert route.call_count == 0  # no model was ever called
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_successful_call_records_real_spend(chat_client: AsyncClient):
+    respx.post("https://api.openai.com/v1/chat/completions").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-spend",
+                "model": "gpt-4o-mini",
+                "choices": [
+                    {"index": 0, "message": {"role": "assistant", "content": "hi"}, "finish_reason": "stop"}
+                ],
+                "usage": {"prompt_tokens": 1000, "completion_tokens": 1000, "total_tokens": 2000},
+            },
+        )
+    )
+    raw_key = await _create_key(chat_client)
+
+    resp = await chat_client.post(
+        "/v1/chat/completions",
+        json={"model": "gpt-4o-mini", "messages": [{"role": "user", "content": "hi"}]},
+        headers={"Authorization": f"Bearer {raw_key}"},
+    )
+    assert resp.status_code == 200
+
+    me_resp = await chat_client.get("/v1/keys/me", headers={"Authorization": f"Bearer {raw_key}"})
+    # 1000 prompt @ $0.15/M + 1000 completion @ $0.60/M = (150 + 600) / 1e6 = $0.00075
+    assert me_resp.json()["spent_usd"] == pytest.approx(0.00075, abs=1e-6)
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_spend_recorded_against_the_model_that_actually_served_not_the_primary(chat_client: AsyncClient):
+    # Primary model gpt-4o fails, fallback gpt-4o-mini succeeds — spend
+    # must use gpt-4o-mini's (cheaper) pricing, not gpt-4o's.
+    respx.post("https://api.openai.com/v1/chat/completions").mock(
+        side_effect=[
+            httpx.Response(500, json={"error": {"message": "down"}}),
+            httpx.Response(
+                200,
+                json={
+                    "id": "chatcmpl-fallback-spend",
+                    "model": "gpt-4o-mini",
+                    "choices": [
+                        {"index": 0, "message": {"role": "assistant", "content": "hi"}, "finish_reason": "stop"}
+                    ],
+                    "usage": {"prompt_tokens": 1000, "completion_tokens": 1000, "total_tokens": 2000},
+                },
+            ),
+        ]
+    )
+    raw_key = await _create_key(chat_client)
+
+    resp = await chat_client.post(
+        "/v1/chat/completions",
+        json={"model": "gpt-4o", "fallback_models": ["gpt-4o-mini"], "messages": [{"role": "user", "content": "hi"}]},
+        headers={"Authorization": f"Bearer {raw_key}"},
+    )
+    assert resp.status_code == 200
+
+    me_resp = await chat_client.get("/v1/keys/me", headers={"Authorization": f"Bearer {raw_key}"})
+    # Must match gpt-4o-mini's pricing ($0.00075), NOT gpt-4o's (would be $0.0125)
+    assert me_resp.json()["spent_usd"] == pytest.approx(0.00075, abs=1e-6)

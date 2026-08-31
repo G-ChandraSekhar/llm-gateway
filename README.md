@@ -45,13 +45,17 @@ alembic upgrade head
 uvicorn app.main:app --reload
 # then in another terminal:
 curl http://localhost:8000/health
-curl -X POST http://localhost:8000/v1/keys -H "Content-Type: application/json" -d '{"name": "my key"}'
+curl -X POST http://localhost:8000/v1/keys -H "Content-Type: application/json" -d '{"name": "my key", "budget_limit_usd": 1.00}'
 curl http://localhost:8000/v1/keys/me -H "Authorization: Bearer <api_key from the previous response>"
 curl -X POST http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer <api_key>" \
   -d '{"model": "gpt-4o", "fallback_models": ["gpt-4o-mini"], "messages": [{"role": "user", "content": "hello"}]}'
 ```
+
+`budget_limit_usd` is optional — omit it for an unlimited key. Once a
+key's `spent_usd` (tracked from real post-call token usage) reaches its
+limit, further requests get a 402 until the limit is raised.
 
 `/health` needs no database or Redis. `/v1/keys` and `/v1/keys/me` need
 Postgres or SQLite as above. `/v1/chat/completions` additionally needs
@@ -82,7 +86,8 @@ llm-gateway/
 ├── alembic/
 │   ├── env.py                    # async migrations, URL from Settings
 │   └── versions/
-│       └── 0001_create_api_keys.py
+│       ├── 0001_create_api_keys.py
+│       └── 0002_rename_budget_columns_to_micros.py
 ├── app/
 │   ├── main.py                  # FastAPI app, /health, keys router
 │   ├── core/
@@ -94,7 +99,9 @@ llm-gateway/
 │   │   ├── circuit_breaker.py    # per-model CircuitBreaker, Redis-backed (Day 5, moved to Redis after Day 7)
 │   │   ├── resilience.py         # call_model: retry + circuit breaker (Day 5)
 │   │   ├── rate_limiter.py       # Redis token bucket, per API key (Day 7)
-│   │   └── token_estimate.py     # pre-call token estimate for rate limiting (Day 7)
+│   │   ├── token_estimate.py     # pre-call token estimate for rate limiting (Day 7)
+│   │   ├── pricing.py            # hardcoded OpenAI $/token rates (Day 8)
+│   │   └── budget.py             # budget check + atomic spend recording (Day 8)
 │   ├── schemas/
 │   │   └── chat.py               # unified ChatCompletionRequest/Response
 │   ├── models/
@@ -105,7 +112,7 @@ llm-gateway/
 │   │   └── openai.py             # OpenAIAdapter
 │   └── routers/
 │       ├── keys.py               # POST /v1/keys, GET /v1/keys/me
-│       └── chat.py               # POST /v1/chat/completions (fallback routing)
+│       └── chat.py               # POST /v1/chat/completions (fallback routing, budget)
 └── tests/
     ├── conftest.py                # in-memory SQLite fixtures
     ├── test_openai_adapter.py
@@ -114,5 +121,7 @@ llm-gateway/
     ├── test_chat_router.py
     ├── test_circuit_breaker.py
     ├── test_resilience.py
-    └── test_rate_limiter.py
+    ├── test_rate_limiter.py
+    ├── test_pricing.py
+    └── test_budget.py
 ```
