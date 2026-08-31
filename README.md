@@ -31,15 +31,25 @@ cp .env.example .env
 # 5. run the test suite
 pytest -v
 
-# 6. boot the app
+# 6. (optional, for exploring the API locally without installing Postgres)
+#    point the app at a throwaway SQLite file and run the migration:
+export DATABASE_URL="sqlite+aiosqlite:///./dev.db"
+alembic upgrade head
+
+# 7. boot the app
 uvicorn app.main:app --reload
 # then in another terminal:
 curl http://localhost:8000/health
+curl -X POST http://localhost:8000/v1/keys -H "Content-Type: application/json" -d '{"name": "my key"}'
+curl http://localhost:8000/v1/keys/me -H "Authorization: Bearer <api_key from the previous response>"
 ```
 
-Postgres and Redis aren't needed yet — nothing in the code touches them
-until Day 3 (Postgres) and Day 7 (Redis). Day 10 adds a `docker-compose.yml`
-that runs both alongside the gateway, so no manual install is planned.
+`/health` needs no database. `/v1/keys` and `/v1/keys/me` do — either point
+`DATABASE_URL` at SQLite as above for quick local exploration, or run real
+Postgres (Day 10 adds `docker-compose.yml` for that; until then,
+`docker run -p 5432:5432 -e POSTGRES_PASSWORD=gateway postgres` plus
+`DATABASE_URL=postgresql+asyncpg://postgres:gateway@localhost:5432/postgres`
+works too).
 
 ## Push to GitHub (first time)
 
@@ -60,18 +70,32 @@ git push -u origin main
 llm-gateway/
 ├── .env.example
 ├── .gitignore
+├── alembic.ini
 ├── requirements.txt
+├── alembic/
+│   ├── env.py                    # async migrations, URL from Settings
+│   └── versions/
+│       └── 0001_create_api_keys.py
 ├── app/
-│   ├── main.py                  # FastAPI app + /health
+│   ├── main.py                  # FastAPI app, /health, keys router
 │   ├── core/
-│   │   └── config.py             # pydantic-settings, env-driven config
+│   │   ├── config.py             # pydantic-settings, env-driven config
+│   │   ├── db.py                 # async engine/session, get_db dependency
+│   │   ├── security.py           # API key generation + hashing
+│   │   └── auth.py               # get_current_api_key dependency
 │   ├── schemas/
 │   │   └── chat.py               # unified ChatCompletionRequest/Response
+│   ├── models/
+│   │   ├── base.py               # SQLAlchemy DeclarativeBase
+│   │   └── api_key.py            # APIKey ORM model
 │   ├── adapters/
 │   │   ├── base.py               # ProviderAdapter interface, ProviderError
 │   │   └── openai.py             # OpenAIAdapter
-│   ├── routers/                  # (empty — Day 4: model-to-model fallback)
-│   └── models/                   # (empty — Day 3: SQLAlchemy models)
+│   └── routers/
+│       └── keys.py               # POST /v1/keys, GET /v1/keys/me
 └── tests/
-    └── test_openai_adapter.py
+    ├── conftest.py                # in-memory SQLite fixtures
+    ├── test_openai_adapter.py
+    ├── test_security.py
+    └── test_keys_router.py
 ```
