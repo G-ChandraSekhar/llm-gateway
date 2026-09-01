@@ -9,11 +9,3 @@ sqlalchemy[asyncio]
 asyncpg
 alembic
 structlog
-
-# dev / test
-pytest
-pytest-asyncio
-respx
-aiosqlite
-fakeredis
-lupa

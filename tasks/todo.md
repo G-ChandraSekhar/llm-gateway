@@ -462,3 +462,63 @@ OpenAI naming conventions make this unlikely in practice.
   snapshot resolution).
 - Re-confirmed live against real OpenAI + real Redis after the fix — see
   next live-verification note once re-run.
+
+---
+
+# Day 9-10 — Docker Compose, real Postgres verification
+
+## What actually got verified live vs. what didn't
+This section is split deliberately, because the honesty matters here more
+than usual.
+
+### Verified live, for real, in my own sandbox:
+- **Real PostgreSQL 16**, installed directly (not via Docker — Docker
+  itself won't install in my sandbox, see below). Ran both Alembic
+  migrations against it for the first time ever (they'd only been tested
+  against SQLite through Day 8). Confirmed the resulting schema via
+  `\d api_keys` in `psql` — matches the SQLAlchemy models exactly.
+- Full request flow against real Postgres + real Redis + a fake-OpenAI
+  stand-in: created a key, made a chat completion, confirmed spend was
+  recorded correctly — then confirmed it a second way, querying Postgres
+  directly with `psql`, bypassing the app entirely. This closes the gap
+  flagged all the way back in Day 3 ("everything tested against SQLite,
+  never verified against real Postgres").
+- `requirements.txt` split into prod (`requirements.txt`) and dev
+  (`requirements-dev.txt`, adds `pytest`/`fakeredis`/`lupa`/etc.).
+  Verified a fresh venv installing from `requirements-dev.txt` still
+  passes all 64 tests — the split didn't break anything.
+
+### NOT verified — genuinely can't, in this environment:
+- **`docker compose up` has never actually been run.** Docker itself
+  fails to install in my sandbox (the package mirror is missing
+  containerd/apparmor dependencies, and even if it installed, nested
+  container runtimes typically don't work in this kind of restricted
+  environment). I wrote `Dockerfile` and `docker-compose.yml` carefully,
+  validated the YAML is syntactically correct and matches the Compose
+  spec, and reasoned through the dependency chain (Postgres/Redis health
+  checks -> one-shot migration container -> gateway) — but the actual
+  build-and-run has never happened. This is a real gap, not a small one.
+  **You will be the first real test of this.** Expect to debug something
+  on the first run — that's normal for any Dockerfile/Compose setup that
+  hasn't been build-tested, not a sign anything is unusually broken.
+
+## Built
+- [x] `Dockerfile` — python:3.12-slim, installs `requirements.txt` only
+      (not the dev/test deps — no reason `lupa`'s C-extension build tools
+      need to ship in a production image)
+- [x] `docker-compose.yml` — postgres (with healthcheck), redis (with
+      healthcheck), a one-shot `migrate` service that runs
+      `alembic upgrade head` and exits, and the `gateway` service itself,
+      which waits for Postgres+Redis to be healthy AND the migration to
+      complete successfully before starting
+- [x] `.dockerignore` — excludes `.venv`, `__pycache__`, `.git`, `.env`,
+      `*.db`, `tasks/`
+- [x] `requirements.txt` / `requirements-dev.txt` split
+
+## Review
+- `pytest -v`: 64/64 still pass with the requirements split.
+- Real Postgres: verified live, schema matches, full request flow
+  confirmed via direct `psql` query (see above) — a genuine gap closed.
+- Docker Compose: NOT live-verified (see above). Next step is you running
+  `docker compose up --build` and pasting whatever happens, same as every
+  other day — I'll debug from real output, not guess at fixes in advance.

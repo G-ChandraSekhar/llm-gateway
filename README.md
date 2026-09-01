@@ -21,8 +21,9 @@ cd llm-gateway
 python3 -m venv .venv
 source .venv/bin/activate        # Windows: .venv\Scripts\activate
 
-# 3. install dependencies
-pip install -r requirements.txt
+# 3. install dependencies (requirements-dev.txt adds pytest/fakeredis/etc
+#    on top of requirements.txt — use requirements.txt alone for a prod-only install)
+pip install -r requirements-dev.txt
 
 # 4. copy env template and fill in provider keys
 cp .env.example .env
@@ -62,6 +63,30 @@ Postgres or SQLite as above. `/v1/chat/completions` additionally needs
 Redis running (Day 7's rate limiter) — without it, that endpoint will
 fail to connect rather than silently skip rate limiting.
 
+## Docker Compose (runs everything with one command)
+
+```bash
+cp .env.example .env
+# edit .env: OPENAI_API_KEY=...
+
+docker compose up --build
+```
+
+This builds the gateway image and starts Postgres, Redis, runs the
+Alembic migrations once (as a one-shot `migrate` service), then starts
+the gateway — all wired together, no manual `brew services start` or
+`export DATABASE_URL=...` needed. The gateway listens on
+`http://localhost:8000`, same as running it manually.
+
+**Honest caveat**: this Compose setup has not been build-tested end to
+end (see `tasks/todo.md`'s Day 9-10 section for why). The YAML is valid
+and the dependency chain (Postgres/Redis healthy -> migration completes
+-> gateway starts) is correct in principle, but the first real
+`docker compose up --build` run against this repo is genuinely untested.
+Expect to possibly hit and fix something on the first run — that's normal
+for any freshly-written Dockerfile/Compose setup, not a sign of a deeper
+problem.
+
 ## Push to GitHub (first time)
 
 ```bash
@@ -81,8 +106,12 @@ git push -u origin main
 llm-gateway/
 ├── .env.example
 ├── .gitignore
+├── .dockerignore
+├── Dockerfile
+├── docker-compose.yml
 ├── alembic.ini
 ├── requirements.txt
+├── requirements-dev.txt
 ├── alembic/
 │   ├── env.py                    # async migrations, URL from Settings
 │   └── versions/
