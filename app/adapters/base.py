@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import AsyncIterator
 
-from app.schemas.chat import ChatCompletionRequest, ChatCompletionResponse
+from app.schemas.chat import ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse
 
 
 class ProviderError(Exception):
@@ -48,5 +49,19 @@ class ProviderAdapter(ABC):
 
         Must raise ProviderError on any failure (HTTP error, timeout,
         malformed response) — never let a bare httpx exception escape.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def chat_completion_stream(self, request: ChatCompletionRequest) -> AsyncIterator[ChatCompletionChunk]:
+        """Perform a streaming chat completion against the provider.
+
+        Must raise ProviderError (not a bare httpx/transport exception)
+        if the call fails BEFORE any chunk has been yielded — that's the
+        only point at which retry/fallback can still apply (see
+        app/core/resilience.py's call_model_stream). A failure that
+        happens after at least one chunk has already been yielded should
+        propagate as a plain exception from the generator; the caller has
+        already committed to this model and won't retry or fall back.
         """
         raise NotImplementedError

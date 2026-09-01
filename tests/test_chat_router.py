@@ -458,3 +458,148 @@ async def test_spend_recorded_against_the_model_that_actually_served_not_the_pri
     me_resp = await chat_client.get("/v1/keys/me", headers={"Authorization": f"Bearer {raw_key}"})
     # Must match gpt-4o-mini's pricing ($0.00075), NOT gpt-4o's (would be $0.0125)
     assert me_resp.json()["spent_usd"] == pytest.approx(0.00075, abs=1e-6)
+
+
+def _sse_body_str(*lines: str) -> str:
+    return "".join(f"data: {line}\n\n" for line in lines) + "data: [DONE]\n\n"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_stream_success_forwards_chunks_and_ends_with_done(chat_client: AsyncClient):
+    respx.post("https://api.openai.com/v1/chat/completions").mock(
+        return_value=httpx.Response(
+            200,
+            content=_sse_body_str(
+                '{"id":"c1","model":"gpt-4o-mini","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}',
+                '{"id":"c1","model":"gpt-4o-mini","choices":[{"index":0,"delta":{"content":"Hi!"},"finish_reason":"stop"}]}',
+                '{"id":"c1","model":"gpt-4o-mini","choices":[],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}',
+            ),
+            headers={"Content-Type": "text/event-stream"},
+        )
+    )
+    raw_key = await _create_key(chat_client)
+
+    async with chat_client.stream(
+        "POST",
+        "/v1/chat/completions",
+        json={"model": "gpt-4o-mini", "messages": [{"role": "user", "content": "hi"}], "stream": True},
+        headers={"Authorization": f"Bearer {raw_key}"},
+    ) as resp:
+        assert resp.status_code == 200
+        assert resp.headers["content-type"].startswith("text/event-stream")
+        body = b"".join([chunk async for chunk in resp.aiter_bytes()]).decode()
+
+    assert body.count("data: ") == 4  # role chunk, content chunk, usage chunk, [DONE]
+    assert '"content":"Hi!"' in body
+    assert body.strip().endswith("data: [DONE]")
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_stream_falls_back_before_first_chunk(chat_client: AsyncClient):
+    respx.post("https://api.openai.com/v1/chat/completions").mock(
+        side_effect=[
+            httpx.Response(500, json={"error": {"message": "down"}}),
+            httpx.Response(
+                200,
+                content=_sse_body_str(
+                    '{"id":"c1","model":"gpt-4o-mini","choices":[{"index":0,"delta":{"content":"fallback worked"},"finish_reason":"stop"}]}'
+                ),
+                headers={"Content-Type": "text/event-stream"},
+            ),
+        ]
+    )
+    raw_key = await _create_key(chat_client)
+
+    async with chat_client.stream(
+        "POST",
+        "/v1/chat/completions",
+        json={
+            "model": "gpt-4o",
+            "fallback_models": ["gpt-4o-mini"],
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": True,
+        },
+        headers={"Authorization": f"Bearer {raw_key}"},
+    ) as resp:
+        assert resp.status_code == 200
+        body = b"".join([chunk async for chunk in resp.aiter_bytes()]).decode()
+
+    assert "fallback worked" in body
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_stream_all_models_failing_before_first_chunk_is_a_real_502(chat_client: AsyncClient):
+    respx.post("https://api.openai.com/v1/chat/completions").mock(
+        return_value=httpx.Response(500, json={"error": {"message": "down"}})
+    )
+    raw_key = await _create_key(chat_client)
+
+    resp = await chat_client.post(
+        "/v1/chat/completions",
+        json={"model": "gpt-4o-mini", "messages": [{"role": "user", "content": "hi"}], "stream": True},
+        headers={"Authorization": f"Bearer {raw_key}"},
+    )
+
+    # A real HTTP 502, NOT a 200 with an error event inside SSE — because
+    # nothing was ever streamed to the client yet.
+    assert resp.status_code == 502
+    assert resp.json()["detail"]["error"] == "All models failed"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_stream_records_spend_from_final_usage_chunk(chat_client: AsyncClient):
+    respx.post("https://api.openai.com/v1/chat/completions").mock(
+        return_value=httpx.Response(
+            200,
+            content=_sse_body_str(
+                '{"id":"c1","model":"gpt-4o-mini","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":"stop"}]}',
+                '{"id":"c1","model":"gpt-4o-mini","choices":[],"usage":{"prompt_tokens":1000,"completion_tokens":1000,"total_tokens":2000}}',
+            ),
+            headers={"Content-Type": "text/event-stream"},
+        )
+    )
+    raw_key = await _create_key(chat_client)
+
+    async with chat_client.stream(
+        "POST",
+        "/v1/chat/completions",
+        json={"model": "gpt-4o-mini", "messages": [{"role": "user", "content": "hi"}], "stream": True},
+        headers={"Authorization": f"Bearer {raw_key}"},
+    ) as resp:
+        async for _ in resp.aiter_bytes():
+            pass
+
+    me_resp = await chat_client.get("/v1/keys/me", headers={"Authorization": f"Bearer {raw_key}"})
+    assert me_resp.json()["spent_usd"] == pytest.approx(0.00075, abs=1e-6)
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_stream_rate_limited_gets_429_before_any_streaming(chat_client: AsyncClient):
+    tiny_limiter = RateLimiter(
+        fakeredis.aioredis.FakeRedis(decode_responses=True), requests_per_minute=1, tokens_per_minute=100_000
+    )
+    app.dependency_overrides[get_rate_limiter] = lambda: tiny_limiter
+
+    respx.post("https://api.openai.com/v1/chat/completions").mock(
+        return_value=_openai_success("gpt-4o-mini")
+    )
+    raw_key = await _create_key(chat_client)
+
+    # Use up the only request in the bucket (non-streaming, simpler).
+    await chat_client.post(
+        "/v1/chat/completions",
+        json={"model": "gpt-4o-mini", "messages": [{"role": "user", "content": "hi"}]},
+        headers={"Authorization": f"Bearer {raw_key}"},
+    )
+
+    resp = await chat_client.post(
+        "/v1/chat/completions",
+        json={"model": "gpt-4o-mini", "messages": [{"role": "user", "content": "hi"}], "stream": True},
+        headers={"Authorization": f"Bearer {raw_key}"},
+    )
+    assert resp.status_code == 429

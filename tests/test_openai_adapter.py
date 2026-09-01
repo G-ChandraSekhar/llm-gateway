@@ -140,3 +140,86 @@ async def test_fallback_models_field_is_never_sent_to_openai(adapter: OpenAIAdap
     sent_body = route.calls[0].request.content
     assert b"fallback_models" not in sent_body
     assert b'"model":"gpt-4o"' in sent_body
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_stream_yields_role_content_and_usage_chunks(adapter: OpenAIAdapter):
+    sse_body = (
+        'data: {"id":"c1","model":"gpt-4o-mini","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}\n\n'
+        'data: {"id":"c1","model":"gpt-4o-mini","choices":[{"index":0,"delta":{"content":"Hi"},"finish_reason":null}]}\n\n'
+        'data: {"id":"c1","model":"gpt-4o-mini","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n'
+        'data: {"id":"c1","model":"gpt-4o-mini","choices":[],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}\n\n'
+        'data: [DONE]\n\n'
+    )
+    respx.post("https://api.openai.com/v1/chat/completions").mock(
+        return_value=httpx.Response(200, content=sse_body, headers={"Content-Type": "text/event-stream"})
+    )
+
+    chunks = [c async for c in adapter.chat_completion_stream(make_request())]
+
+    assert len(chunks) == 4
+    assert chunks[0].choices[0].delta.role == "assistant"
+    assert chunks[1].choices[0].delta.content == "Hi"
+    assert chunks[2].choices[0].finish_reason == "stop"
+    assert chunks[3].choices == []
+    assert chunks[3].usage.total_tokens == 7
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_stream_request_includes_stream_options_for_usage(adapter: OpenAIAdapter):
+    route = respx.post("https://api.openai.com/v1/chat/completions").mock(
+        return_value=httpx.Response(200, content="data: [DONE]\n\n", headers={"Content-Type": "text/event-stream"})
+    )
+
+    async for _ in adapter.chat_completion_stream(make_request()):
+        pass
+
+    sent = route.calls[0].request.content
+    assert b'"stream":true' in sent
+    assert b'"include_usage":true' in sent
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_stream_rejects_before_yielding_anything_on_error_status(adapter: OpenAIAdapter):
+    respx.post("https://api.openai.com/v1/chat/completions").mock(
+        return_value=httpx.Response(429, json={"error": {"message": "rate limited"}})
+    )
+
+    gen = adapter.chat_completion_stream(make_request())
+    with pytest.raises(ProviderError) as exc_info:
+        await gen.__anext__()
+
+    assert exc_info.value.status_code == 429
+    assert exc_info.value.retryable is True
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_stream_with_no_chunks_at_all_just_ends(adapter: OpenAIAdapter):
+    respx.post("https://api.openai.com/v1/chat/completions").mock(
+        return_value=httpx.Response(200, content="data: [DONE]\n\n", headers={"Content-Type": "text/event-stream"})
+    )
+
+    chunks = [c async for c in adapter.chat_completion_stream(make_request())]
+    assert chunks == []
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_stream_ignores_malformed_sse_line_mid_stream(adapter: OpenAIAdapter):
+    sse_body = (
+        'data: {"id":"c1","model":"gpt-4o-mini","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":null}]}\n\n'
+        "data: not valid json at all\n\n"
+        'data: {"id":"c1","model":"gpt-4o-mini","choices":[{"index":0,"delta":{"content":"still ok"},"finish_reason":"stop"}]}\n\n'
+        "data: [DONE]\n\n"
+    )
+    respx.post("https://api.openai.com/v1/chat/completions").mock(
+        return_value=httpx.Response(200, content=sse_body, headers={"Content-Type": "text/event-stream"})
+    )
+
+    chunks = [c async for c in adapter.chat_completion_stream(make_request())]
+    assert len(chunks) == 2  # the malformed line was skipped, not fatal
+    assert chunks[1].choices[0].delta.content == "still ok"

@@ -50,6 +50,39 @@ class ChatCompletionResponse(BaseModel):
     usage: Usage
 
 
+class ChunkDelta(BaseModel):
+    """Incremental piece of a streamed message — unlike Choice.message,
+    both fields are optional since a real chunk only ever carries one or
+    the other (role on the first chunk, content on subsequent ones, and
+    the final chunk carries neither).
+    """
+
+    role: Optional[Role] = None
+    content: Optional[str] = None
+
+
+class ChunkChoice(BaseModel):
+    index: int = 0
+    delta: ChunkDelta
+    finish_reason: Optional[str] = None
+
+
+class ChatCompletionChunk(BaseModel):
+    """One SSE event's worth of a streamed response — the gateway's own
+    shape (matches ChatCompletionResponse's field names/conventions), not
+    a passthrough of OpenAI's wire format. `usage` is None on every chunk
+    except the final one (requested via stream_options.include_usage),
+    which also has an empty `choices` list — that's how OpenAI signals
+    "this chunk is usage-only, not more content."
+    """
+
+    id: str
+    model: str
+    provider: str
+    choices: list[ChunkChoice]
+    usage: Optional[Usage] = None
+
+
 class GatewayErrorResponse(BaseModel):
     error: str
     provider: Optional[str] = None
