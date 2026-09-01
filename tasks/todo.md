@@ -522,3 +522,59 @@ than usual.
 - Docker Compose: NOT live-verified (see above). Next step is you running
   `docker compose up --build` and pasting whatever happens, same as every
   other day — I'll debug from real output, not guess at fixes in advance.
+
+---
+
+# Closing a real gap: admin auth on key management
+
+## Decisions (yours)
+- **Single shared admin secret** via `ADMIN_API_KEY` env var, not
+  per-key admin flags — simpler, matches the project's scale.
+- **Also added while in this area**: `GET /v1/keys` (list, admin-only)
+  and `DELETE /v1/keys/{id}` (revoke, admin-only) — a key could be
+  created but never revoked before this.
+
+## Built
+- [x] app/core/config.py: `admin_api_key: str = ""` — empty by default
+- [x] app/core/admin_auth.py: `require_admin` dependency. **Fails
+      closed** if `ADMIN_API_KEY` is unset (503, "admin endpoints are
+      disabled") rather than silently allowing open access — an
+      unconfigured secret in a real deployment should be a loud failure,
+      not an accidental wide-open door. Uses `hmac.compare_digest` for
+      the secret comparison, not `==`, for the same timing-attack reason
+      API key hashing avoided a naive comparison back in Day 3.
+- [x] app/routers/keys.py: `POST /v1/keys` now admin-gated; added
+      `GET /v1/keys` (list all, admin-only) and `DELETE /v1/keys/{id}`
+      (soft-revoke — sets `is_active=False` + `revoked_at`, doesn't
+      delete the row, so spend/name history survives for audit).
+      `GET /v1/keys/me` deliberately NOT admin-gated — that's a caller
+      looking up their own key with their own key, a different thing
+      from an admin operation.
+- [x] `.env.example` updated with a placeholder `ADMIN_API_KEY` (with an
+      explicit "change this before it's exposed anywhere" comment)
+- [x] tests/test_admin_auth.py — 6 unit tests, including the fail-closed
+      behavior specifically
+- [x] tests/test_keys_router.py — 5 new tests (admin-required on create/
+      list/revoke, listing returns all keys without leaking raw key
+      material, revoked key fails auth immediately)
+- [x] Every existing test that creates a key via the API updated to send
+      the admin header — a real ripple across `tests/conftest.py` (added
+      a shared `TEST_ADMIN_KEY`/`ADMIN_HEADERS`), `test_keys_router.py`,
+      and `test_chat_router.py` (both its `_create_key` helper and its
+      own local `Settings` override needed the admin key wired through)
+
+## Review
+- `pytest -v`: 77/77 passed (17 new: 6 admin-auth unit tests, 5 new
+  keys-router tests, plus every pre-existing test updated for the new
+  admin requirement rather than skipped or weakened).
+- Live end-to-end test against real Postgres: unauthenticated and
+  wrong-secret attempts both correctly rejected with 401; correct secret
+  creates a key; `GET /v1/keys` correctly lists all keys (including ones
+  created in earlier sessions — genuine Postgres persistence across
+  restarts, not just within one process); `DELETE /v1/keys/{id}`
+  correctly deactivates; the revoked key immediately fails its own
+  `/v1/keys/me` lookup with "Invalid or inactive API key."
+- Not yet done: streaming support (flagged since Day 2), `structlog`
+  listed in requirements but never actually used (every log line so far
+  is a plain `logger.warning`/`print`, not structured JSON), CI, load
+  test, README architecture diagram.

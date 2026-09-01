@@ -46,8 +46,17 @@ alembic upgrade head
 uvicorn app.main:app --reload
 # then in another terminal:
 curl http://localhost:8000/health
-curl -X POST http://localhost:8000/v1/keys -H "Content-Type: application/json" -d '{"name": "my key", "budget_limit_usd": 1.00}'
-curl http://localhost:8000/v1/keys/me -H "Authorization: Bearer <api_key from the previous response>"
+
+# key creation, listing, and revocation require ADMIN_API_KEY (set in .env)
+curl -X POST http://localhost:8000/v1/keys \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <your ADMIN_API_KEY>" \
+  -d '{"name": "my key", "budget_limit_usd": 1.00}'
+curl http://localhost:8000/v1/keys -H "Authorization: Bearer <your ADMIN_API_KEY>"
+curl -X DELETE http://localhost:8000/v1/keys/<key id> -H "Authorization: Bearer <your ADMIN_API_KEY>"
+
+# the key itself (not the admin secret) is used for everything else:
+curl http://localhost:8000/v1/keys/me -H "Authorization: Bearer <api_key from creation>"
 curl -X POST http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer <api_key>" \
@@ -57,6 +66,10 @@ curl -X POST http://localhost:8000/v1/chat/completions \
 `budget_limit_usd` is optional — omit it for an unlimited key. Once a
 key's `spent_usd` (tracked from real post-call token usage) reaches its
 limit, further requests get a 402 until the limit is raised.
+
+Admin endpoints (`POST`/`GET`/`DELETE /v1/keys`) refuse ALL requests if
+`ADMIN_API_KEY` isn't set in `.env` — that's intentional (fail closed,
+not open) — see `app/core/admin_auth.py`.
 
 `/health` needs no database or Redis. `/v1/keys` and `/v1/keys/me` need
 Postgres or SQLite as above. `/v1/chat/completions` additionally needs
@@ -124,6 +137,7 @@ llm-gateway/
 │   │   ├── db.py                 # async engine/session, get_db dependency
 │   │   ├── security.py           # API key generation + hashing
 │   │   ├── auth.py               # get_current_api_key dependency
+│   │   ├── admin_auth.py         # require_admin dependency, fail-closed
 │   │   ├── adapters.py           # get_openai_adapter singleton
 │   │   ├── circuit_breaker.py    # per-model CircuitBreaker, Redis-backed (Day 5, moved to Redis after Day 7)
 │   │   ├── resilience.py         # call_model: retry + circuit breaker (Day 5)
@@ -146,6 +160,7 @@ llm-gateway/
     ├── conftest.py                # in-memory SQLite fixtures
     ├── test_openai_adapter.py
     ├── test_security.py
+    ├── test_admin_auth.py
     ├── test_keys_router.py
     ├── test_chat_router.py
     ├── test_circuit_breaker.py

@@ -13,6 +13,7 @@ from app.core.circuit_breaker import CircuitBreaker, get_circuit_breaker
 from app.core.config import Settings, get_settings
 from app.core.rate_limiter import RateLimiter, get_rate_limiter
 from app.main import app
+from tests.conftest import ADMIN_HEADERS, TEST_ADMIN_KEY
 
 
 def _openai_success(model: str) -> httpx.Response:
@@ -47,6 +48,7 @@ async def chat_client(client: AsyncClient) -> AsyncClient:
     settings = Settings(
         openai_api_key="test-key",
         openai_base_url="https://api.openai.com/v1",
+        admin_api_key=TEST_ADMIN_KEY,
         retry_max_attempts=1,
         retry_base_delay_seconds=0.0,
         retry_max_delay_seconds=0.0,
@@ -83,7 +85,7 @@ async def chat_client(client: AsyncClient) -> AsyncClient:
 
 
 async def _create_key(client: AsyncClient) -> str:
-    resp = await client.post("/v1/keys", json={"name": "chat test key"})
+    resp = await client.post("/v1/keys", json={"name": "chat test key"}, headers=ADMIN_HEADERS)
     return resp.json()["api_key"]
 
 
@@ -359,7 +361,9 @@ async def test_rate_limit_is_scoped_per_key_not_global(chat_client: AsyncClient)
 @pytest.mark.asyncio
 @respx.mock
 async def test_over_budget_key_gets_402_before_calling_any_model(chat_client: AsyncClient):
-    create_resp = await chat_client.post("/v1/keys", json={"name": "broke", "budget_limit_usd": 0.01})
+    create_resp = await chat_client.post(
+        "/v1/keys", json={"name": "broke", "budget_limit_usd": 0.01}, headers=ADMIN_HEADERS
+    )
     raw_key = create_resp.json()["api_key"]
 
     # Manually push spend over the limit by hitting the DB directly through

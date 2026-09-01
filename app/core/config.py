@@ -38,6 +38,13 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+asyncpg://gateway:gateway@localhost:5432/gateway"
     redis_url: str = "redis://localhost:6379/0"
 
+    # --- Admin auth (post-Day-10) ---
+    # Guards POST /v1/keys, GET /v1/keys, and key revocation. Empty means
+    # "not configured" — admin endpoints fail CLOSED (503) rather than
+    # silently allowing open access, since an unset secret in a real
+    # deployment is a much more dangerous default than a loud failure.
+    admin_api_key: str = ""
+
 
 @lru_cache
 def get_settings() -> Settings:
