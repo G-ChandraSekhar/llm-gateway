@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 
 import redis.asyncio as redis
+import structlog
 from fastapi import Depends, HTTPException, status
 
 from app.core.auth import get_current_api_key
@@ -12,6 +13,8 @@ from app.core.config import get_settings
 from app.core.token_estimate import estimate_request_tokens
 from app.models.api_key import APIKey
 from app.schemas.chat import ChatCompletionRequest
+
+logger = structlog.get_logger(__name__)
 
 # Atomic in a single round trip: refills both buckets (requests, tokens)
 # based on elapsed time, then only commits the consumption if BOTH have
@@ -182,6 +185,12 @@ async def enforce_rate_limit(
 
     if not result.allowed:
         reason_text = "requests-per-minute limit exceeded" if result.reason == 1 else "tokens-per-minute limit exceeded"
+        logger.warning(
+            "rate_limited",
+            api_key_id=api_key.id,
+            reason=reason_text,
+            retry_after_seconds=round(result.retry_after_seconds, 2),
+        )
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             headers={"Retry-After": str(round(result.retry_after_seconds, 2))},

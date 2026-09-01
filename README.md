@@ -61,7 +61,20 @@ curl -X POST http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer <api_key>" \
   -d '{"model": "gpt-4o", "fallback_models": ["gpt-4o-mini"], "messages": [{"role": "user", "content": "hello"}]}'
+
+# streaming: add "stream": true, use -N (curl won't buffer) to see chunks arrive live
+curl -N -X POST http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <api_key>" \
+  -d '{"model": "gpt-4o-mini", "messages": [{"role": "user", "content": "hello"}], "stream": true}'
 ```
+
+Streamed chunks are Server-Sent Events in the gateway's own shape (not a
+raw passthrough of OpenAI's wire format) — `{"id", "model", "provider",
+"choices": [{"delta": {"role"|"content"}, "finish_reason"}], "usage"}`,
+ending with a `data: [DONE]` line. Fallback/retry only apply BEFORE the
+first chunk is sent; once a stream has started, a failure ends it with a
+single error event rather than silently switching models mid-response.
 
 `budget_limit_usd` is optional — omit it for an unlimited key. Once a
 key's `spent_usd` (tracked from real post-call token usage) reaches its
@@ -144,7 +157,9 @@ llm-gateway/
 │   │   ├── rate_limiter.py       # Redis token bucket, per API key (Day 7)
 │   │   ├── token_estimate.py     # pre-call token estimate for rate limiting (Day 7)
 │   │   ├── pricing.py            # hardcoded OpenAI $/token rates (Day 8)
-│   │   └── budget.py             # budget check + atomic spend recording (Day 8)
+│   │   ├── budget.py             # budget check + atomic spend recording (Day 8)
+│   │   ├── logging_config.py     # structlog setup: JSON in prod, console in dev
+│   │   └── request_logging.py    # RequestLoggingMiddleware, request_id correlation
 │   ├── schemas/
 │   │   └── chat.py               # unified ChatCompletionRequest/Response
 │   ├── models/
@@ -160,6 +175,7 @@ llm-gateway/
     ├── conftest.py                # in-memory SQLite fixtures
     ├── test_openai_adapter.py
     ├── test_security.py
+    ├── test_logging_config.py
     ├── test_admin_auth.py
     ├── test_keys_router.py
     ├── test_chat_router.py

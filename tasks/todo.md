@@ -578,3 +578,157 @@ than usual.
   listed in requirements but never actually used (every log line so far
   is a plain `logger.warning`/`print`, not structured JSON), CI, load
   test, README architecture diagram.
+
+---
+
+# Streaming support
+
+## Decisions (yours)
+- **Fallback/retry only before the first chunk is sent.** Once a stream
+  has genuinely started delivering content, a failure becomes a
+  stream-level error event that ends the stream — no silent model switch
+  mid-response, since the client may already be rendering content it
+  can't un-receive.
+- **Chunks are reshaped into the gateway's own schema**
+  (`ChatCompletionChunk`/`ChunkChoice`/`ChunkDelta`, matching the
+  non-streaming response's field naming conventions), not a raw
+  passthrough of OpenAI's exact wire format.
+
+## Built
+- [x] app/schemas/chat.py: `ChunkDelta`, `ChunkChoice`, `ChatCompletionChunk`
+- [x] app/adapters/base.py: `chat_completion_stream` added to the
+      `ProviderAdapter` interface
+- [x] app/adapters/openai.py: `chat_completion_stream` — sets
+      `stream_options.include_usage=true` so the final chunk carries real
+      token usage (without this, a streamed call would have NO usage
+      data at all, and Day 8's budget tracker would silently under-count
+      every streamed request). Checks the response status BEFORE reading
+      any SSE lines — that's the exact boundary that lets retry/fallback
+      still apply safely.
+- [x] app/core/resilience.py: `call_model_stream` — a hand-rolled retry
+      loop (not tenacity, which doesn't have a clean way to express
+      "retry only the first item pulled from an async generator, then
+      hand back the rest untouched"). Retries only the pre-first-chunk
+      phase; anything after propagates straight to the caller.
+- [x] app/routers/chat.py: `body.stream` branches into
+      `_establish_stream` (the fallback loop for streaming, structurally
+      mirroring the non-streaming loop) + `_sse_body` (forwards chunks as
+      SSE, records spend from whichever chunk carries real usage,
+      converts a mid-stream `ProviderError` into a single terminal error
+      event rather than attempting fallback). `response_model=None` on
+      the route since it returns either a plain JSON response or a
+      `StreamingResponse` depending on `body.stream` — FastAPI can't
+      apply one Pydantic response model to both.
+- [x] tests/test_openai_adapter.py — 5 new tests (chunk parsing, usage
+      chunk shape, error-before-first-chunk, empty stream, malformed
+      mid-stream line tolerated)
+- [x] tests/test_resilience.py — 5 new tests, including one that
+      constructs a fake adapter whose generator yields one chunk then
+      raises, specifically proving no retry happens once past that point
+- [x] tests/test_chat_router.py — 5 new integration tests: full
+      streaming success, fallback recovers before first chunk, total
+      failure is a REAL 502 (not a 200 SSE with an error inside),
+      spend recorded from the real usage chunk, rate limiting still
+      blocks a streaming request before any content is sent
+
+## Review
+- `pytest -v`: 92/92 passed (15 new streaming tests across three files).
+- Live end-to-end: real `uvicorn` + a fake-OpenAI stand-in that emits
+  genuine SSE over a real socket with real ~50ms inter-chunk delays (not
+  buffered). Measured wall-clock time on the request (~0.42s) confirmed
+  chunks actually arrived incrementally, not all at once. Content deltas
+  concatenated correctly to "Real streaming works.", the final usage-only
+  chunk was parsed correctly, and spend was recorded with the exact right
+  number from real token counts.
+- Live end-to-end, fallback: broken primary model correctly failed
+  BEFORE any chunk was sent, fell back to a working model, streamed its
+  content successfully — no corrupted/mixed output.
+- Live end-to-end, total failure: with every model broken before any
+  content streamed, the endpoint returned a genuine HTTP 502 with the
+  full attempts list — not a 200 status hiding an error inside the SSE
+  body, which would be a much worse experience for a real client.
+- NOT yet tested: real OpenAI's actual SSE streaming behavior — my fake
+  stand-in matches OpenAI's documented format precisely, but every other
+  "verified against the real API" claim in this project came from
+  actually calling OpenAI, and this one hasn't yet. Worth doing once on
+  the user's machine with `curl -N ... -d '{"stream": true, ...}'`
+  against a real key before fully trusting this against production
+  OpenAI traffic.
+
+## Still open
+`structlog` in requirements, never used (every log line is still a plain
+`logger.warning`) — the other real gap flagged before streaming. CI, load
+test, README architecture diagram all still pending too.
+
+---
+
+# Structured logging (structlog actually wired in)
+
+`structlog` sat in `requirements.txt` unused since Day 1 — every log line
+through Day 10 was a plain string via stdlib `logging`, not structured at
+all. Closing that.
+
+## Built
+- [x] app/core/logging_config.py — `configure_logging()`: JSON output in
+      anything but `development` (ready for a real log aggregator without
+      extra work), colored human-readable console output in dev. Wired
+      into Python's stdlib `logging` via `structlog.stdlib`, so third-party
+      libraries' own log calls (httpx, uvicorn, etc.) flow through the
+      same pipeline automatically — confirmed live (see below), not
+      assumed.
+- [x] app/core/request_logging.py — `RequestLoggingMiddleware`: one
+      `request_completed` event per request (method, path, status,
+      duration_ms), and binds a `request_id` into structlog's contextvars
+      for the request's whole lifetime — every log line emitted anywhere
+      downstream during that request (a retry, a circuit trip, a
+      rate-limit rejection) automatically carries the same `request_id`,
+      with no manual threading required.
+- [x] app/main.py — calls `configure_logging()` at process startup,
+      installs the middleware
+- [x] Converted the one existing plain log call (`app/core/budget.py`)
+      to structured, and added meaningful new structured events at the
+      real decision points that had none before:
+      - `app/core/circuit_breaker.py`: `circuit_opened` (with
+        failure_count) and `circuit_skip` (a call skipped because the
+        circuit is open) — required changing the `_RECORD_FAILURE_SCRIPT`
+        Lua script to return whether the transition to OPEN actually
+        happened this call, not just log unconditionally
+      - `app/core/resilience.py`: `retrying_model_call` (non-streaming,
+        via tenacity's `before_sleep` hook) and `retrying_stream_start`
+        (streaming, in the hand-rolled retry loop)
+      - `app/core/rate_limiter.py`: `rate_limited`
+      - `app/routers/chat.py`: `model_failed_falling_back`,
+        `model_skipped_circuit_open`, `all_models_failed` (+ streaming
+        equivalents)
+      - `app/core/budget.py`: `budget_exceeded`, `spend_recorded`,
+        `pricing_unavailable` (renamed/restructured from the old
+        `%r`-formatted warning string)
+- [x] tests/test_logging_config.py — 3 tests: production mode emits
+      genuinely parseable JSON with the right fields, dev mode does NOT
+      emit JSON (proves the branch actually differs, not just "doesn't
+      crash"), and log-level filtering actually suppresses below-threshold
+      events
+
+## Review
+- `pytest -v`: 95/95 passed (3 new logging-config tests; every other test
+  file still green after the circuit-breaker Lua script change and the
+  new logging calls sprinkled through existing code paths).
+- Live end-to-end, BOTH modes, against a real running server:
+  - **Development mode**: readable colored console output confirmed,
+    with `request_completed` and `spend_recorded` events sharing the
+    same `request_id`.
+  - **Production/JSON mode**: every line individually parsed as valid
+    JSON (checked programmatically, not eyeballed) across a real
+    multi-request sequence — a retry (`retrying_model_call`, attempt=1,
+    real status code), a circuit opening (`circuit_opened`,
+    failure_count=1), a fallback (`model_failed_falling_back`), and then
+    — on a THIRD, separate HTTP request — the circuit correctly
+    remembered as open (`circuit_skip`, `model_skipped_circuit_open`),
+    proving the Redis-backed circuit state genuinely persists across
+    requests, not just within one. httpx's own internal request logs
+    were swept into the same structured JSON pipeline automatically,
+    confirming the stdlib integration works for third-party loggers too.
+
+## Still open
+CI, load test script, README architecture diagram — pure polish items,
+no remaining functional gaps.

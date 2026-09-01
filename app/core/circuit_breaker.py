@@ -5,8 +5,11 @@ from dataclasses import dataclass
 from functools import lru_cache
 
 import redis.asyncio as redis
+import structlog
 
 from app.core.config import get_settings
+
+logger = structlog.get_logger(__name__)
 
 # Reads current state and, if it's OPEN and the cooldown has elapsed,
 # atomically transitions it to HALF_OPEN and lets exactly one trial call
@@ -70,7 +73,7 @@ local state = redis.call('HGET', KEYS[1], 'state')
 if state == 'half_open' then
     redis.call('HSET', KEYS[1], 'state', 'open', 'opened_at', now)
     redis.call('EXPIRE', KEYS[1], ttl)
-    return
+    return {'open', -1}
 end
 
 local count = tonumber(redis.call('HGET', KEYS[1], 'failure_count'))
@@ -79,10 +82,13 @@ count = count + 1
 
 if count >= threshold then
     redis.call('HSET', KEYS[1], 'state', 'open', 'failure_count', count, 'opened_at', now)
+    redis.call('EXPIRE', KEYS[1], ttl)
+    return {'open', count}
 else
     redis.call('HSET', KEYS[1], 'state', 'closed', 'failure_count', count)
+    redis.call('EXPIRE', KEYS[1], ttl)
+    return {'closed', count}
 end
-redis.call('EXPIRE', KEYS[1], ttl)
 """
 
 
@@ -127,7 +133,10 @@ class CircuitBreaker:
     async def is_open(self, key: str) -> bool:
         """True if a call for this key should be skipped right now."""
         result = await self._is_open_script(keys=[self._key(key)], args=[time.time(), self._cooldown_seconds])
-        return bool(int(result))
+        skipped = bool(int(result))
+        if skipped:
+            logger.info("circuit_skip", model=key)
+        return skipped
 
     async def record_success(self, key: str) -> None:
         # Unconditional reset — a single HSET is already atomic as one
@@ -136,9 +145,12 @@ class CircuitBreaker:
         await self._redis.expire(self._key(key), self._key_ttl)
 
     async def record_failure(self, key: str) -> None:
-        await self._record_failure_script(
+        result = await self._record_failure_script(
             keys=[self._key(key)], args=[time.time(), self._failure_threshold, self._key_ttl]
         )
+        new_state, failure_count = result[0], int(result[1])
+        if new_state == "open":
+            logger.warning("circuit_opened", model=key, failure_count=failure_count)
 
     async def snapshot(self, key: str) -> CircuitSnapshot:
         """Read-only view of a circuit's current state — for tests and

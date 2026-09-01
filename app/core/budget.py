@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-import logging
-
+import structlog
 from fastapi import Depends, HTTPException, status
 from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -10,7 +9,7 @@ from app.core.auth import get_current_api_key
 from app.core.db import get_db
 from app.models.api_key import APIKey
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 def is_over_budget(api_key: APIKey) -> bool:
@@ -31,6 +30,12 @@ async def enforce_budget(api_key: APIKey = Depends(get_current_api_key)) -> None
     nobody's near their budget.
     """
     if is_over_budget(api_key):
+        logger.warning(
+            "budget_exceeded",
+            api_key_id=api_key.id,
+            spent_usd=api_key.spent_micros / 1_000_000,
+            budget_limit_usd=(api_key.budget_limit_micros or 0) / 1_000_000,
+        )
         raise HTTPException(
             status_code=status.HTTP_402_PAYMENT_REQUIRED,
             detail={
@@ -50,6 +55,7 @@ async def record_spend(db: AsyncSession, api_key_id: str, cost_micros: int) -> N
         update(APIKey).where(APIKey.id == api_key_id).values(spent_micros=APIKey.spent_micros + cost_micros)
     )
     await db.commit()
+    logger.info("spend_recorded", api_key_id=api_key_id, cost_micros=cost_micros)
 
 
 def record_cost_or_warn(model: str, prompt_tokens: int, completion_tokens: int) -> int | None:
@@ -61,5 +67,10 @@ def record_cost_or_warn(model: str, prompt_tokens: int, completion_tokens: int) 
 
     cost_micros = compute_cost_micros(model, prompt_tokens, completion_tokens)
     if cost_micros is None:
-        logger.warning("No pricing entry for model=%r — spend NOT recorded for this call", model)
+        logger.warning(
+            "pricing_unavailable",
+            model=model,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+        )
     return cost_micros
