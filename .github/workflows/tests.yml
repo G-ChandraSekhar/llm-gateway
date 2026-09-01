@@ -1,0 +1,30 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Run tests
+        run: pytest -v
+
+      # No Postgres/Redis service containers needed — the test suite
+      # deliberately stands in with SQLite (aiosqlite) and fakeredis for
+      # every-day speed. Real Postgres and real Redis have each been
+      # verified manually once against this codebase; see tasks/todo.md.

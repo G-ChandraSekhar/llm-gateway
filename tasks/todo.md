@@ -732,3 +732,58 @@ all. Closing that.
 ## Still open
 CI, load test script, README architecture diagram — pure polish items,
 no remaining functional gaps.
+
+---
+
+# Polish: CI, load test, architecture diagram
+
+No functional gaps remain after this — everything below is about making
+the project easier to trust and demo, not new behavior.
+
+## Built
+- [x] `.github/workflows/tests.yml` — runs `pytest -v` on every push and
+      PR to `main`. No Postgres/Redis service containers needed — the
+      test suite deliberately uses SQLite + `fakeredis` for every-day
+      speed, and real Postgres/Redis have each already been verified
+      manually once (see the Day 9-10 and Day 3 sections above). Validated
+      the YAML structurally; the "true" key PyYAML shows when parsing the
+      bare `on:` trigger is a known, harmless YAML 1.1 quirk — GitHub's
+      own parser handles it correctly, and it's present in essentially
+      every GitHub Actions workflow file that exists.
+- [x] `scripts/load_test.py` — concurrent load test against a REAL
+      running gateway (real OpenAI calls, real money). Reports latency
+      percentiles (p50/p95/p99), throughput, and a status-code breakdown.
+      Defaults are deliberately small (20 requests, concurrency 4) given
+      the cost — your call to raise them.
+- [x] README: Mermaid architecture diagram, CI badge, load-test
+      instructions, updated file tree.
+
+## Review
+- `pytest -v`: 95/95 still passing (no test files changed in this round).
+- The Mermaid diagram was actually parsed with Mermaid's own real parser
+  (`mermaid.parse()` in a headless Node/jsdom environment — a full Chrome
+  render wasn't available in this sandbox, but syntax validation was) —
+  came back `diagramType: flowchart-v2`, zero errors. Not just eyeballed.
+- The load test script's own logic was verified live against a real
+  running server + a fake-OpenAI stand-in (can't spend the user's real
+  OpenAI money myself): confirmed correct concurrency control, correct
+  latency/throughput math, and correct status-code breakdown reporting
+  under two scenarios — normal load (20/20 succeeded) and a deliberately
+  tight rate limit (exactly 5/20 succeeded, 15 correctly reported as 429,
+  matching a 5-req/min limit exactly under genuine concurrent load, not
+  sequential).
+- NOT yet verified: an actual `git push` triggering the GitHub Actions
+  workflow for real (I can validate YAML structure, but only GitHub's own
+  runners can prove the workflow actually executes and passes), and the
+  load test's real-OpenAI-cost path (only run against my fake stand-in).
+  Both are worth doing once, same pattern as every other "verify on your
+  machine" step in this project.
+
+## Where the project stands now
+Every core feature from the original 10-day plan, every gap flagged
+along the way, streaming, structured logging, and now CI/load
+testing/documentation — all built, all tested (95 passing tests), and
+everything with real infrastructure implications (Postgres, Redis,
+Docker, real OpenAI) verified live at least once, either by me in a
+sandbox or by the user on their own machine. Nothing known-broken or
+known-untested remains outside what's explicitly flagged above.

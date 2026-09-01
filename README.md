@@ -1,10 +1,52 @@
 # LLM Gateway
 
+![Tests](https://github.com/G-ChandraSekhar/llm-gateway/actions/workflows/tests.yml/badge.svg)
+
 API proxy in front of OpenAI — one schema, retries, model-to-model
 fallback (e.g. gpt-4o → gpt-4o-mini), rate limiting, per-key budgets,
 gateway-issued auth.
 
 See `tasks/todo.md` for day-by-day build status and design notes.
+
+## Architecture
+
+```mermaid
+flowchart TD
+    Client([Client]) -->|"Bearer sk-gw-..."| Auth[Auth<br/>hash lookup, Postgres]
+    Auth --> RateLimit[Rate limit<br/>Redis token bucket]
+    RateLimit --> Budget[Budget check<br/>pre-call, Postgres]
+    Budget --> Router{Router}
+
+    Router -->|try model N| Circuit{Circuit<br/>open?}
+    Circuit -->|skip| Router
+    Circuit -->|call| Retry[Retry<br/>exp backoff + jitter]
+    Retry -->|fail, retryable| Retry
+    Retry -->|success| OpenAI[(OpenAI API)]
+    Retry -->|exhausted| Router
+    OpenAI --> Success([Response / SSE stream])
+    Router -->|all models failed| Failure([502, attempts listed])
+
+    Success --> Spend[Record spend<br/>real usage, Postgres]
+
+    RateLimit -.state.-> Redis[(Redis)]
+    Circuit -.state.-> Redis
+    Auth -.keys/budget.-> PG[(Postgres)]
+    Budget -.spend.-> PG
+    Spend -.-> PG
+
+    style Client fill:#e8f4ff
+    style OpenAI fill:#fff3e0
+    style Redis fill:#ffebee
+    style PG fill:#e8f5e9
+```
+
+Auth, rate limiting, and budget enforcement all run **once per request**,
+before any model is attempted — a rejected request never reaches the
+router. Retry and the circuit breaker operate **per model**, inside the
+router's fallback loop: a model's own failures don't affect a different
+model's circuit. Streaming follows the identical path up through the
+first chunk; after that, no further fallback — a mid-stream failure ends
+the response instead of silently switching models.
 
 ## Stack
 Python 3.11+ · FastAPI (async) · httpx (OpenAI only) · tenacity · Redis ·
@@ -113,6 +155,20 @@ Expect to possibly hit and fix something on the first run — that's normal
 for any freshly-written Dockerfile/Compose setup, not a sign of a deeper
 problem.
 
+## Load testing
+
+```bash
+python scripts/load_test.py --api-key <your gateway api_key> --requests 20 --concurrency 4
+```
+
+Sends real requests against a real running gateway (which calls real
+OpenAI) — costs a small amount of real money on the defaults above.
+Reports latency percentiles, throughput, and a status-code breakdown, so
+you can watch the Redis-backed rate limiter and circuit breaker hold up
+correctly under genuinely concurrent load, not just the sequential
+requests the test suite's mocked tests exercise. Point `--url` at a
+different host to test a deployed instance instead of localhost.
+
 ## Push to GitHub (first time)
 
 ```bash
@@ -133,6 +189,9 @@ llm-gateway/
 ├── .env.example
 ├── .gitignore
 ├── .dockerignore
+├── .github/
+│   └── workflows/
+│       └── tests.yml            # CI: runs pytest on every push/PR
 ├── Dockerfile
 ├── docker-compose.yml
 ├── alembic.ini
@@ -171,6 +230,8 @@ llm-gateway/
 │   └── routers/
 │       ├── keys.py               # POST /v1/keys, GET /v1/keys/me
 │       └── chat.py               # POST /v1/chat/completions (fallback routing, budget)
+├── scripts/
+│   └── load_test.py             # concurrent load test against a running gateway
 └── tests/
     ├── conftest.py                # in-memory SQLite fixtures
     ├── test_openai_adapter.py
